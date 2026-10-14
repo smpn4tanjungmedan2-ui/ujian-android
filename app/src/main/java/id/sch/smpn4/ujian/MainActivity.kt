@@ -3,7 +3,10 @@ package id.sch.smpn4.ujian
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.ActivityManager
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -16,6 +19,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.webkit.CookieManager
@@ -47,12 +51,19 @@ class MainActivity : AppCompatActivity() {
             "https://script.google.com/macros/s/AKfycbySHc7hr3YQT5tLv4qalPMMqAFODc0j-xAOLFRmFsUhI2qIQb4pNP4-m4pCUSvXp1E/exec"
         const val NPSN = "69726973"
         const val APP_UA = "SMPN4ExamApp/1.0"
+        const val SIREN_MS = 30_000L          // lama sirine berbunyi
+        const val SR = 22050                  // sample rate suara buatan
 
         private val ALLOWED_HOSTS = listOf(
             "script.google.com",
             "googleusercontent.com",
             "vercel.app"
         )
+
+        // Sirine hidup di luar siklus activity agar tetap bunyi walau aplikasi ditutup
+        private var sirenTrack: AudioTrack? = null
+        private val sirenHandler = Handler(Looper.getMainLooper())
+        @Volatile private var sirenOn = false
     }
 
     private lateinit var webView: WebView
@@ -65,6 +76,8 @@ class MainActivity : AppCompatActivity() {
     private var lastSent = 0L
 
     private var pinWanted = true
+    private var everPinned = false            // pernah benar-benar tersemat
+    private var lastPinTry = 0L
     private val splashStart = SystemClock.uptimeMillis()
     private var splashHidden = false
 
@@ -72,7 +85,8 @@ class MainActivity : AppCompatActivity() {
     private var dqReason = ""
     private var exiting = false
 
-    private var boomData: ShortArray? = null
+    private var sirenData: ShortArray? = null
+    private var buzzerData: ShortArray? = null
     private var tts: TextToSpeech? = null
     private var ttsReady = false
 
@@ -98,6 +112,12 @@ class MainActivity : AppCompatActivity() {
             suppressFor(1500)
         }
 
+    // Layar "Aplikasi admin perangkat": setelah selesai (diizinkan / ditolak) baru minta sematan
+    private val adminLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            pinWanted = true
+        }
+
     // ---------- Jembatan JS: dipanggil halaman ujian ----------
     inner class JsBridge {
         @JavascriptInterface
@@ -106,6 +126,7 @@ class MainActivity : AppCompatActivity() {
                 if (disqualified) return@runOnUiThread
                 examActive = true
                 pinWanted = true
+                if (!isPinned()) everPinned = false
                 suppressFor(5000)
                 ensurePinned()
             }
@@ -116,6 +137,7 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 examActive = false
                 pinWanted = false
+                everPinned = false
                 try { stopLockTask() } catch (_: Exception) {}
             }
         }
@@ -134,7 +156,6 @@ class MainActivity : AppCompatActivity() {
         blackout = findViewById(R.id.blackout)
         handler.postDelayed({ hideSplash() }, 12000)
 
-        // Keyboard & lubang kamera: beri ruang supaya tombol bawah naik di atas keyboard
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.root)) { v, insets ->
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
             val cut = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
@@ -142,8 +163,11 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        // Siapkan suara "boom" dan suara bicara
-        Thread { boomData = buildBoom() }.start()
+        // Siapkan suara buatan (sirine & buzzer) dan suara bicara
+        Thread {
+            sirenData = buildSiren()
+            buzzerData = buildBuzzer()
+        }.start()
         tts = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 val r = tts?.setLanguage(Locale("id", "ID"))
@@ -261,6 +285,13 @@ class MainActivity : AppCompatActivity() {
         if (savedInstanceState == null) webView.loadUrl(startUrl())
         else webView.restoreState(savedInstanceState)
 
+        // Minta izin "admin perangkat" (untuk mengunci layar) sekali di awal; sematan menyusul setelahnya
+        if (isAdminActive()) {
+            pinWanted = true
+        } else {
+            pinWanted = false
+            handler.postDelayed({ requestAdmin() }, 1500)
+        }
         handler.postDelayed(watchdog, 1000)
     }
 
@@ -285,6 +316,36 @@ class MainActivity : AppCompatActivity() {
         return ALLOWED_HOSTS.any { host == it || host.endsWith(".$it") }
     }
 
+    // ---------- Admin perangkat (untuk mengunci layar) ----------
+    private fun adminComp() = ComponentName(this, AdminReceiver::class.java)
+
+    private fun isAdminActive(): Boolean {
+        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        return dpm.isAdminActive(adminComp())
+    }
+
+    private fun requestAdmin() {
+        if (isAdminActive()) { pinWanted = true; return }
+        try {
+            val i = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+                .putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminComp())
+                .putExtra(
+                    DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                    "Diperlukan agar layar HP terkunci otomatis bila siswa mencoba keluar saat ujian."
+                )
+            adminLauncher.launch(i)
+        } catch (_: Exception) {
+            pinWanted = true
+        }
+    }
+
+    private fun lockScreenNow() {
+        try {
+            val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+            if (dpm.isAdminActive(adminComp())) dpm.lockNow()
+        } catch (_: Exception) {}
+    }
+
     // ---------- EXIT (keluar biasa, BUKAN diskualifikasi) ----------
     private fun confirmExit() {
         if (disqualified || exiting) return
@@ -303,8 +364,12 @@ class MainActivity : AppCompatActivity() {
         exiting = true
         examActive = false
         pinWanted = false
+        everPinned = false
         try { stopLockTask() } catch (_: Exception) {}
-        speakThen("Kamu keluar dari ujian") { finishAndRemoveTask() }
+        buzzerData?.let { playShot(it) }
+        handler.postDelayed({
+            speakThen("Peringatan! Kamu keluar dari ujian! Kamu keluar dari ujian!") { finishAndRemoveTask() }
+        }, 1300)
     }
 
     private fun speakThen(text: String, then: () -> Unit) {
@@ -318,22 +383,35 @@ class MainActivity : AppCompatActivity() {
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) { runOnUiThread { once() } }
         })
-        t.speak(text, TextToSpeech.QUEUE_FLUSH, null, "exit")
-        handler.postDelayed({ once() }, 5000)
+        try {
+            t.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ALARM)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            t.setPitch(0.45f)          // suara berat
+            t.setSpeechRate(0.8f)      // pelan & menekan
+            maxAlarmVolume()
+            t.speak(text, TextToSpeech.QUEUE_FLUSH, null, "exit")
+        } catch (_: Exception) { once(); return }
+        handler.postDelayed({ once() }, 8000)
     }
 
-    // ---------- Diskualifikasi langsung: mencoba keluar (Home / Recent) ----------
+    // ---------- Diskualifikasi langsung ----------
     private fun hardDisqualify(reason: String) {
         if (!examActive || disqualified || exiting) return
         if (System.currentTimeMillis() < suppressUntil) return
         disqualified = true
         dqReason = reason
-        playBoom()
+        startSiren()
         blackout.visibility = View.VISIBLE
         pushDisqualify()
         examActive = false
         pinWanted = false
+        everPinned = false
         try { stopLockTask() } catch (_: Exception) {}
+        handler.postDelayed({ lockScreenNow() }, 400)   // kunci layar HP
     }
 
     private fun pushDisqualify() {
@@ -345,53 +423,105 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Suara "boom" dibuat lewat kode (tanpa file suara)
-    private fun buildBoom(): ShortArray {
-        val sr = 22050
-        val n = (sr * 2.0).toInt()
+    // ---------- Suara buatan ----------
+    // Sirine peringatan bencana: nada naik-turun 600 -> 1500 -> 600 Hz, 3 detik per siklus
+    private fun buildSiren(): ShortArray {
+        val cycle = 3.0
+        val n = (SR * cycle).toInt()
         val out = ShortArray(n)
         var phase = 0.0
-        val rnd = java.util.Random(7)
         for (i in 0 until n) {
-            val t = i.toDouble() / sr
-            val f = 55.0 + 140.0 * Math.exp(-5.0 * t)
-            phase += 2 * Math.PI * f / sr
-            val body = Math.sin(phase) * Math.exp(-2.0 * t)
-            val crack = (rnd.nextDouble() * 2 - 1) * Math.exp(-12.0 * t)
-            val s = Math.tanh((body * 1.7 + crack * 1.3) * 2.4)
-            out[i] = (s * 32767).toInt().toShort()
+            val t = i.toDouble() / SR
+            val f = 600.0 + 900.0 * (0.5 - 0.5 * Math.cos(2 * Math.PI * t / cycle))
+            phase += 2 * Math.PI * f / SR
+            val s = Math.sin(phase) + 0.5 * Math.sin(2 * phase) + 0.3 * Math.sin(3 * phase)
+            out[i] = (Math.tanh(s * 2.0) * 32767).toInt().toShort()
         }
         return out
     }
 
-    private fun playBoom() {
+    // Buzzer: 3 dengung keras
+    private fun buildBuzzer(): ShortArray {
+        val n = (SR * 1.3).toInt()
+        val out = ShortArray(n)
+        for (i in 0 until n) {
+            val t = i.toDouble() / SR
+            val on = (t % 0.45) < 0.30
+            if (!on) { out[i] = 0; continue }
+            val s = Math.sin(2 * Math.PI * 220 * t) +
+                0.6 * Math.sin(2 * Math.PI * 440 * t) +
+                0.4 * Math.sin(2 * Math.PI * 660 * t)
+            out[i] = (Math.tanh(s * 2.2) * 32767).toInt().toShort()
+        }
+        return out
+    }
+
+    private fun maxAlarmVolume() {
         try {
-            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            try {
-                am.setStreamVolume(AudioManager.STREAM_ALARM, am.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0)
-            } catch (_: Exception) {}
-            val data = boomData ?: return
-            val track = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ALARM)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(22050)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                        .build()
-                )
-                .setBufferSizeInBytes(data.size * 2)
-                .setTransferMode(AudioTrack.MODE_STATIC)
-                .build()
-            track.write(data, 0, data.size)
-            track.play()
-            handler.postDelayed({ try { track.release() } catch (_: Exception) {} }, 3000)
+            val am = applicationContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.setStreamVolume(AudioManager.STREAM_ALARM, am.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0)
         } catch (_: Exception) {}
+    }
+
+    private fun alarmTrack(data: ShortArray): AudioTrack =
+        AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ALARM)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(SR)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .build()
+            )
+            .setBufferSizeInBytes(data.size * 2)
+            .setTransferMode(AudioTrack.MODE_STATIC)
+            .build()
+
+    private fun playShot(data: ShortArray) {
+        try {
+            maxAlarmVolume()
+            val track = alarmTrack(data)
+            track.write(data, 0, data.size)
+            track.setVolume(1.0f)
+            track.play()
+            handler.postDelayed({ try { track.release() } catch (_: Exception) {} },
+                data.size * 1000L / SR + 500)
+        } catch (_: Exception) {}
+    }
+
+    // Sirine berulang 30 detik; volume alarm dipaksa maksimal tiap 0,15 detik
+    private fun startSiren() {
+        if (sirenOn) return
+        val data = sirenData ?: return
+        try {
+            maxAlarmVolume()
+            val track = alarmTrack(data)
+            track.write(data, 0, data.size)
+            track.setLoopPoints(0, data.size, -1)
+            track.setVolume(1.0f)
+            track.play()
+            sirenTrack = track
+            sirenOn = true
+        } catch (_: Exception) { return }
+
+        val guard = object : Runnable {
+            override fun run() {
+                if (!sirenOn) return
+                maxAlarmVolume()
+                sirenHandler.postDelayed(this, 150)
+            }
+        }
+        sirenHandler.post(guard)
+        sirenHandler.postDelayed({
+            sirenOn = false
+            try { sirenTrack?.stop(); sirenTrack?.release() } catch (_: Exception) {}
+            sirenTrack = null
+        }, SIREN_MS)
     }
 
     // ---------- Screen pinning ----------
@@ -401,18 +531,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun ensurePinned() {
-        if (!isPinned()) {
-            try { startLockTask() } catch (_: Exception) {}
-        }
+        if (isPinned()) return
+        val now = System.currentTimeMillis()
+        if (now - lastPinTry < 2500) return          // jangan membanjiri dialog sematan
+        lastPinTry = now
+        try { startLockTask() } catch (_: Exception) {}
     }
 
+    // Cek tiap 0,6 detik. Sematan yang tadinya aktif lalu lepas saat ujian = diskualifikasi langsung.
     private val watchdog = object : Runnable {
         override fun run() {
-            if (pinWanted && !isPinned()) {
-                if (examActive) sendViolation("Melepas mode sematkan layar")
-                ensurePinned()
+            val pinned = isPinned()
+            if (pinned) everPinned = true
+            if (pinWanted && !pinned) {
+                if (examActive && everPinned) {
+                    hardDisqualify("Melepas sematan layar saat ujian")
+                } else {
+                    if (examActive) sendViolation("Sematan layar belum aktif")
+                    ensurePinned()
+                }
             }
-            handler.postDelayed(this, 2500)
+            handler.postDelayed(this, 600)
         }
     }
 
@@ -457,6 +596,14 @@ class MainActivity : AppCompatActivity() {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) enterImmersive()
         else sendViolation("Layar ujian kehilangan fokus (notifikasi / aplikasi lain)")
+    }
+
+    // Tombol volume diblokir selama sirine
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (sirenOn && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
+                keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+                keyCode == KeyEvent.KEYCODE_VOLUME_MUTE)) return true
+        return super.onKeyDown(keyCode, event)
     }
 
     private fun enterImmersive() {
