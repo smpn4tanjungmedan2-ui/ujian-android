@@ -8,4 +8,33 @@
         android:id="@+id/webView"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
+
+    <!-- Loading screen -->
+    <FrameLayout
+        android:id="@+id/splash"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#0F172A"
+        android:clickable="true"
+        android:focusable="true">
+
+        <!-- Logo di tengah. Kalau gambar adalah background penuh layar:
+             ganti centerInside -> centerCrop dan padding -> 0dp -->
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="Logo sekolah"
+            android:padding="64dp"
+            android:scaleType="centerInside"
+            android:src="@drawable/logo" />
+
+        <ProgressBar
+            style="?android:attr/progressBarStyleSmall"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="56dp"
+            android:indeterminate="true"
+            android:indeterminateTint="#FFFFFF" />
+    </FrameLayout>
 </FrameLayout>
