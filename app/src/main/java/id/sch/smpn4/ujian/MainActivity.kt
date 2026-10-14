@@ -9,6 +9,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.view.View
 import android.view.WindowManager
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
@@ -51,6 +53,11 @@ class MainActivity : AppCompatActivity() {
     private var suppressUntil = 0L          // abaikan pelanggaran sampai waktu ini
     private var lastSent = 0L
 
+    private var pinWanted = true            // sematan aktif sejak aplikasi dibuka
+    private lateinit var splash: View
+    private val splashStart = SystemClock.uptimeMillis()
+    private var splashHidden = false
+
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private var pendingPerm: PermissionRequest? = null
 
@@ -74,20 +81,22 @@ class MainActivity : AppCompatActivity() {
         }
 
     // ---------- Jembatan JS: dipanggil halaman ujian ----------
-    inner class JsBridge {
+       inner class JsBridge {
         @JavascriptInterface
         fun lock() {
             runOnUiThread {
                 examActive = true
+                pinWanted = true
                 suppressFor(5000)           // dialog "sematkan layar" tidak dihitung pelanggaran
                 ensurePinned()
             }
         }
 
         @JavascriptInterface
-        fun unlock() {
+        fun exit() {
             runOnUiThread {
                 examActive = false
+                pinWanted = false
                 try { stopLockTask() } catch (_: Exception) {}
             }
         }
@@ -103,6 +112,8 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(R.layout.activity_main)
         webView = findViewById(R.id.webView)
+        splash = findViewById(R.id.splash)
+        handler.postDelayed({ hideSplash() }, 12000)   // jaga-jaga kalau halaman lambat
 
         WebView.setWebContentsDebuggingEnabled(false)
 
@@ -131,6 +142,10 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 return !isAllowed(request.url)     // true = diblokir
+            }
+
+            override fun onPageFinished(view: WebView, url: String?) {
+                hideSplash()
             }
 
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
@@ -198,10 +213,22 @@ class MainActivity : AppCompatActivity() {
         if (savedInstanceState == null) webView.loadUrl(startUrl())
         else webView.restoreState(savedInstanceState)
 
-        handler.postDelayed(watchdog, 3000)
+        handler.postDelayed(watchdog, 1000)
     }
 
     private fun startUrl() = "$HUB_URL?school=$NPSN"
+
+    // Loading screen minimal tampil 2 detik, lalu memudar
+    private fun hideSplash() {
+        if (splashHidden) return
+        splashHidden = true
+        val wait = (2000 - (SystemClock.uptimeMillis() - splashStart)).coerceAtLeast(0)
+        handler.postDelayed({
+            splash.animate().alpha(0f).setDuration(400)
+                .withEndAction { splash.visibility = View.GONE }
+                .start()
+        }, wait)
+    }
 
     private fun isAllowed(uri: Uri): Boolean {
         if (uri.scheme != "https") return false
@@ -224,8 +251,8 @@ class MainActivity : AppCompatActivity() {
     // Cek tiap 2,5 detik: kalau siswa melepas sematan saat ujian -> pelanggaran + minta sematkan lagi
     private val watchdog = object : Runnable {
         override fun run() {
-            if (examActive && !isPinned()) {
-                sendViolation("Melepas mode sematkan layar")
+            if (pinWanted && !isPinned()) {
+                if (examActive) sendViolation("Melepas mode sematkan layar")
                 ensurePinned()
             }
             handler.postDelayed(this, 2500)
