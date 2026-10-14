@@ -1,4 +1,4 @@
-package NPSN = "6972693"   // <-- SESUAIKAN dengan package project Anda
+package id.sch.smpn4.ujian   // <-- SESUAIKAN dengan package project Anda
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -33,7 +33,7 @@ class MainActivity : AppCompatActivity() {
     companion object {
         const val HUB_URL =
             "https://script.google.com/macros/s/AKfycbySHc7hr3YQT5tLv4qalPMMqAFODc0j-xAOLFRmFsUhI2qIQb4pNP4-m4pCUSvXp1E/exec"
-        const val NPSN = "ISI_NPSN_SEKOLAH"          // <-- GANTI
+        const val NPSN = "69726973"          // <-- GANTI
         const val APP_UA = "SMPN4ExamApp/1.0"
 
         // Hanya host ini yang boleh dibuka di dalam aplikasi
