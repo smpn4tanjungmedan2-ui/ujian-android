@@ -1,13 +1,84 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#FFFFFF">
 
-    <WebView
-        android:id="@+id/webView"
+    <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <WebView
+            android:id="@+id/webView"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <!-- Tombol bawah ala Exambro -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/btnBack"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="#14B8A6"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:text="BACK"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnExit"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="#15803D"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:text="EXIT"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnRefresh"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="#166534"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:text="REFRESH"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnForward"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="#10B981"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:text="FORWARD"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+    </LinearLayout>
 
     <!-- Loading screen -->
     <FrameLayout
@@ -18,8 +89,6 @@
         android:clickable="true"
         android:focusable="true">
 
-        <!-- Logo di tengah. Kalau gambar adalah background penuh layar:
-             ganti centerInside -> centerCrop dan padding -> 0dp -->
         <ImageView
             android:layout_width="match_parent"
             android:layout_height="match_parent"
@@ -37,4 +106,49 @@
             android:indeterminate="true"
             android:indeterminateTint="#FFFFFF" />
     </FrameLayout>
+
+    <!-- Layar hitam saat didiskualifikasi -->
+    <LinearLayout
+        android:id="@+id/blackout"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#000000"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="32dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="⛔"
+            android:textSize="56sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Anda didiskualifikasi"
+            android:textColor="#EF4444"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center"
+            android:text="Sistem mendeteksi Anda mencoba keluar dari aplikasi ujian.\nSilakan hubungi pengawas ruang."
+            android:textColor="#D1D5DB"
+            android:textSize="15sp" />
+
+        <Button
+            android:id="@+id/btnClose"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:text="Tutup aplikasi" />
+    </LinearLayout>
 </FrameLayout>
