@@ -1,17 +1,24 @@
-package id.sch.smpn4.ujian   // <-- SESUAIKAN dengan package project Anda
+package id.sch.smpn4.ujian
 
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.ActivityManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.view.View
 import android.view.WindowManager
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
@@ -21,42 +28,53 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.CookieManager
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
     companion object {
         const val HUB_URL =
             "https://script.google.com/macros/s/AKfycbySHc7hr3YQT5tLv4qalPMMqAFODc0j-xAOLFRmFsUhI2qIQb4pNP4-m4pCUSvXp1E/exec"
-        const val NPSN = "69726973"          // <-- GANTI
+        const val NPSN = "69726973"
         const val APP_UA = "SMPN4ExamApp/1.0"
 
-        // Hanya host ini yang boleh dibuka di dalam aplikasi
         private val ALLOWED_HOSTS = listOf(
             "script.google.com",
-            "googleusercontent.com",   // iframe Apps Script + foto
-            "vercel.app"               // ganti ke domain Vercel Anda yang persis bila mau lebih ketat
+            "googleusercontent.com",
+            "vercel.app"
         )
     }
 
     private lateinit var webView: WebView
+    private lateinit var splash: View
+    private lateinit var blackout: View
     private val handler = Handler(Looper.getMainLooper())
 
-    private var examActive = false          // diset oleh halaman ujian (Vercel)
-    private var suppressUntil = 0L          // abaikan pelanggaran sampai waktu ini
+    private var examActive = false
+    private var suppressUntil = 0L
     private var lastSent = 0L
 
-    private var pinWanted = true            // sematan aktif sejak aplikasi dibuka
-    private lateinit var splash: View
+    private var pinWanted = true
     private val splashStart = SystemClock.uptimeMillis()
     private var splashHidden = false
+
+    private var disqualified = false
+    private var dqReason = ""
+    private var exiting = false
+
+    private var boomData: ShortArray? = null
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
 
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private var pendingPerm: PermissionRequest? = null
@@ -81,13 +99,14 @@ class MainActivity : AppCompatActivity() {
         }
 
     // ---------- Jembatan JS: dipanggil halaman ujian ----------
-       inner class JsBridge {
+    inner class JsBridge {
         @JavascriptInterface
         fun lock() {
             runOnUiThread {
+                if (disqualified) return@runOnUiThread
                 examActive = true
                 pinWanted = true
-                suppressFor(5000)           // dialog "sematkan layar" tidak dihitung pelanggaran
+                suppressFor(5000)
                 ensurePinned()
             }
         }
@@ -106,14 +125,31 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Anti screenshot / rekam layar / preview di recent apps
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         setContentView(R.layout.activity_main)
         webView = findViewById(R.id.webView)
         splash = findViewById(R.id.splash)
-        handler.postDelayed({ hideSplash() }, 12000)   // jaga-jaga kalau halaman lambat
+        blackout = findViewById(R.id.blackout)
+        handler.postDelayed({ hideSplash() }, 12000)
+
+        // Keyboard & lubang kamera: beri ruang supaya tombol bawah naik di atas keyboard
+        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.root)) { v, insets ->
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            val cut = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
+            v.setPadding(cut.left, cut.top, cut.right, maxOf(ime.bottom, cut.bottom))
+            insets
+        }
+
+        // Siapkan suara "boom" dan suara bicara
+        Thread { boomData = buildBoom() }.start()
+        tts = TextToSpeech(this) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                val r = tts?.setLanguage(Locale("id", "ID"))
+                ttsReady = r != TextToSpeech.LANG_MISSING_DATA && r != TextToSpeech.LANG_NOT_SUPPORTED
+            }
+        }
 
         WebView.setWebContentsDebuggingEnabled(false)
 
@@ -132,7 +168,6 @@ class MainActivity : AppCompatActivity() {
             setAcceptThirdPartyCookies(webView, true)
         }
 
-        // Matikan tekan-lama (seleksi/copy)
         webView.isLongClickable = false
         webView.setOnLongClickListener { true }
         webView.isHapticFeedbackEnabled = false
@@ -141,7 +176,7 @@ class MainActivity : AppCompatActivity() {
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                return !isAllowed(request.url)     // true = diblokir
+                return !isAllowed(request.url)
             }
 
             override fun onPageFinished(view: WebView, url: String?) {
@@ -162,7 +197,6 @@ class MainActivity : AppCompatActivity() {
 
         webView.webChromeClient = object : WebChromeClient() {
 
-            // Izin kamera untuk foto jawaban
             override fun onPermissionRequest(request: PermissionRequest) {
                 runOnUiThread {
                     val wantsCam = request.resources.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)
@@ -182,7 +216,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Pilih file / foto
             override fun onShowFileChooser(
                 view: WebView,
                 callback: ValueCallback<Array<Uri>>,
@@ -203,7 +236,22 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Tombol Back dimatikan
+        // Tombol bawah
+        findViewById<View>(R.id.btnBack).setOnClickListener {
+            if (examActive) toast("Tombol BACK dinonaktifkan saat ujian")
+            else if (webView.canGoBack()) webView.goBack()
+        }
+        findViewById<View>(R.id.btnForward).setOnClickListener {
+            if (examActive) toast("Tombol FORWARD dinonaktifkan saat ujian")
+            else if (webView.canGoForward()) webView.goForward()
+        }
+        findViewById<View>(R.id.btnRefresh).setOnClickListener {
+            val u = webView.url
+            if (u.isNullOrEmpty() || u == "about:blank") webView.loadUrl(startUrl()) else webView.reload()
+        }
+        findViewById<View>(R.id.btnExit).setOnClickListener { confirmExit() }
+        findViewById<View>(R.id.btnClose).setOnClickListener { finishAndRemoveTask() }
+
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() { /* diblokir */ }
         })
@@ -218,7 +266,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun startUrl() = "$HUB_URL?school=$NPSN"
 
-    // Loading screen minimal tampil 2 detik, lalu memudar
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+
     private fun hideSplash() {
         if (splashHidden) return
         splashHidden = true
@@ -236,6 +285,115 @@ class MainActivity : AppCompatActivity() {
         return ALLOWED_HOSTS.any { host == it || host.endsWith(".$it") }
     }
 
+    // ---------- EXIT (keluar biasa, BUKAN diskualifikasi) ----------
+    private fun confirmExit() {
+        if (disqualified || exiting) return
+        suppressFor(Long.MAX_VALUE / 2)
+        AlertDialog.Builder(this)
+            .setTitle("Keluar dari ujian?")
+            .setMessage("Jawaban yang sudah tersimpan tetap aman. Anda bisa masuk lagi selama waktu ujian masih ada.")
+            .setNegativeButton("Batal") { d, _ -> d.dismiss() }
+            .setPositiveButton("Keluar") { _, _ -> doExit() }
+            .setOnDismissListener { suppressFor(1500) }
+            .show()
+    }
+
+    private fun doExit() {
+        if (exiting) return
+        exiting = true
+        examActive = false
+        pinWanted = false
+        try { stopLockTask() } catch (_: Exception) {}
+        speakThen("Kamu keluar dari ujian") { finishAndRemoveTask() }
+    }
+
+    private fun speakThen(text: String, then: () -> Unit) {
+        var done = false
+        val once: () -> Unit = { if (!done) { done = true; then() } }
+        val t = tts
+        if (t == null || !ttsReady) { once(); return }
+        t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) { runOnUiThread { once() } }
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) { runOnUiThread { once() } }
+        })
+        t.speak(text, TextToSpeech.QUEUE_FLUSH, null, "exit")
+        handler.postDelayed({ once() }, 5000)
+    }
+
+    // ---------- Diskualifikasi langsung: mencoba keluar (Home / Recent) ----------
+    private fun hardDisqualify(reason: String) {
+        if (!examActive || disqualified || exiting) return
+        if (System.currentTimeMillis() < suppressUntil) return
+        disqualified = true
+        dqReason = reason
+        playBoom()
+        blackout.visibility = View.VISIBLE
+        pushDisqualify()
+        examActive = false
+        pinWanted = false
+        try { stopLockTask() } catch (_: Exception) {}
+    }
+
+    private fun pushDisqualify() {
+        val safe = dqReason.replace("'", "").replace("\\", "")
+        webView.post {
+            webView.evaluateJavascript(
+                "window.onNativeDisqualify && window.onNativeDisqualify('$safe')", null
+            )
+        }
+    }
+
+    // Suara "boom" dibuat lewat kode (tanpa file suara)
+    private fun buildBoom(): ShortArray {
+        val sr = 22050
+        val n = (sr * 2.0).toInt()
+        val out = ShortArray(n)
+        var phase = 0.0
+        val rnd = java.util.Random(7)
+        for (i in 0 until n) {
+            val t = i.toDouble() / sr
+            val f = 55.0 + 140.0 * Math.exp(-5.0 * t)
+            phase += 2 * Math.PI * f / sr
+            val body = Math.sin(phase) * Math.exp(-2.0 * t)
+            val crack = (rnd.nextDouble() * 2 - 1) * Math.exp(-12.0 * t)
+            val s = Math.tanh((body * 1.7 + crack * 1.3) * 2.4)
+            out[i] = (s * 32767).toInt().toShort()
+        }
+        return out
+    }
+
+    private fun playBoom() {
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            try {
+                am.setStreamVolume(AudioManager.STREAM_ALARM, am.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0)
+            } catch (_: Exception) {}
+            val data = boomData ?: return
+            val track = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ALARM)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(22050)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(data.size * 2)
+                .setTransferMode(AudioTrack.MODE_STATIC)
+                .build()
+            track.write(data, 0, data.size)
+            track.play()
+            handler.postDelayed({ try { track.release() } catch (_: Exception) {} }, 3000)
+        } catch (_: Exception) {}
+    }
+
     // ---------- Screen pinning ----------
     private fun isPinned(): Boolean {
         val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -248,7 +406,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Cek tiap 2,5 detik: kalau siswa melepas sematan saat ujian -> pelanggaran + minta sematkan lagi
     private val watchdog = object : Runnable {
         override fun run() {
             if (pinWanted && !isPinned()) {
@@ -259,7 +416,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ---------- Deteksi pelanggaran native ----------
+    // ---------- Pelanggaran ringan (3x = Curang) ----------
     private fun suppressFor(ms: Long) {
         suppressUntil = System.currentTimeMillis() + ms
     }
@@ -280,13 +437,20 @@ class MainActivity : AppCompatActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        sendViolation("Menekan tombol Home / pindah aplikasi")
+        hardDisqualify("Mencoba keluar dari aplikasi ujian (Home / pindah aplikasi)")
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (disqualified) {
+            blackout.visibility = View.VISIBLE
+            pushDisqualify()   // kirim ulang, jaga-jaga laporan pertama gagal saat di latar belakang
+        }
     }
 
     override fun onPause() {
         super.onPause()
         sendViolation("Aplikasi ujian ditinggalkan")
-        // webView.onPause() sengaja TIDAK dipanggil agar halaman tetap bisa menerima laporan
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -309,6 +473,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        tts?.shutdown()
         webView.removeJavascriptInterface("AndroidApp")
         webView.destroy()
         super.onDestroy()
