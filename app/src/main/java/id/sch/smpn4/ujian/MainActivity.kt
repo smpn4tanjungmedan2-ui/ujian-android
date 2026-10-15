@@ -52,6 +52,8 @@ class MainActivity : AppCompatActivity() {
         const val NPSN = "69726973"
         const val APP_UA = "SMPN4ExamApp/1.0"
         const val SIREN_MS = 30_000L          // lama sirine berbunyi
+        const val USE_DEVICE_ADMIN = false    // false = tanpa admin perangkat (HP tidak ikut terkunci)
+        const val FOCUS_LOSS_MS = 1200L       // fokus hilang selama ini = dianggap keluar
         const val SR = 22050                  // sample rate suara buatan
 
         private val ALLOWED_HOSTS = listOf(
@@ -77,6 +79,7 @@ class MainActivity : AppCompatActivity() {
 
     private var pinWanted = true
     private var everPinned = false            // pernah benar-benar tersemat
+    private var awaitingPin = false           // baru mulai ujian, menunggu siswa menekan "Mulai" di dialog sematan
     private var lastPinTry = 0L
     private val splashStart = SystemClock.uptimeMillis()
     private var splashHidden = false
@@ -112,11 +115,15 @@ class MainActivity : AppCompatActivity() {
             suppressFor(1500)
         }
 
-    // Layar "Aplikasi admin perangkat": setelah selesai (diizinkan / ditolak) baru minta sematan
     private val adminLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
             pinWanted = true
         }
+
+    // Dipicu bila fokus layar hilang lebih dari FOCUS_LOSS_MS (gestur dari bawah, aplikasi lain, dsb.)
+    private val focusLossCheck = Runnable {
+        hardDisqualify("Meninggalkan layar ujian (gestur / aplikasi lain)")
+    }
 
     // ---------- Jembatan JS: dipanggil halaman ujian ----------
     inner class JsBridge {
@@ -127,7 +134,9 @@ class MainActivity : AppCompatActivity() {
                 examActive = true
                 pinWanted = true
                 if (!isPinned()) everPinned = false
-                suppressFor(5000)
+                // beri waktu siswa menekan "Mulai" pada dialog sematan
+                awaitingPin = !isPinned()
+                suppressFor(if (awaitingPin) 20_000L else 3_000L)
                 ensurePinned()
             }
         }
@@ -138,6 +147,7 @@ class MainActivity : AppCompatActivity() {
                 examActive = false
                 pinWanted = false
                 everPinned = false
+                awaitingPin = false
                 try { stopLockTask() } catch (_: Exception) {}
             }
         }
@@ -163,7 +173,6 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        // Siapkan suara buatan (sirine & buzzer) dan suara bicara
         Thread {
             sirenData = buildSiren()
             buzzerData = buildBuzzer()
@@ -260,7 +269,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Tombol bawah
         findViewById<View>(R.id.btnBack).setOnClickListener {
             if (examActive) toast("Tombol BACK dinonaktifkan saat ujian")
             else if (webView.canGoBack()) webView.goBack()
@@ -285,8 +293,7 @@ class MainActivity : AppCompatActivity() {
         if (savedInstanceState == null) webView.loadUrl(startUrl())
         else webView.restoreState(savedInstanceState)
 
-        // Minta izin "admin perangkat" (untuk mengunci layar) sekali di awal; sematan menyusul setelahnya
-        if (isAdminActive()) {
+        if (!USE_DEVICE_ADMIN || isAdminActive()) {
             pinWanted = true
         } else {
             pinWanted = false
@@ -316,7 +323,7 @@ class MainActivity : AppCompatActivity() {
         return ALLOWED_HOSTS.any { host == it || host.endsWith(".$it") }
     }
 
-    // ---------- Admin perangkat (untuk mengunci layar) ----------
+    // ---------- Admin perangkat (nonaktif bila USE_DEVICE_ADMIN = false) ----------
     private fun adminComp() = ComponentName(this, AdminReceiver::class.java)
 
     private fun isAdminActive(): Boolean {
@@ -340,6 +347,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun lockScreenNow() {
+        if (!USE_DEVICE_ADMIN) return
         try {
             val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
             if (dpm.isAdminActive(adminComp())) dpm.lockNow()
@@ -365,6 +373,8 @@ class MainActivity : AppCompatActivity() {
         examActive = false
         pinWanted = false
         everPinned = false
+        awaitingPin = false
+        handler.removeCallbacks(focusLossCheck)
         try { stopLockTask() } catch (_: Exception) {}
         buzzerData?.let { playShot(it) }
         handler.postDelayed({
@@ -390,8 +400,8 @@ class MainActivity : AppCompatActivity() {
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build()
             )
-            t.setPitch(0.45f)          // suara berat
-            t.setSpeechRate(0.8f)      // pelan & menekan
+            t.setPitch(0.45f)
+            t.setSpeechRate(0.8f)
             maxAlarmVolume()
             t.speak(text, TextToSpeech.QUEUE_FLUSH, null, "exit")
         } catch (_: Exception) { once(); return }
@@ -404,14 +414,16 @@ class MainActivity : AppCompatActivity() {
         if (System.currentTimeMillis() < suppressUntil) return
         disqualified = true
         dqReason = reason
-        startSiren()
+        handler.removeCallbacks(focusLossCheck)
+        startSiren()                       // sirine dulu, secepat mungkin
         blackout.visibility = View.VISIBLE
         pushDisqualify()
         examActive = false
         pinWanted = false
         everPinned = false
+        awaitingPin = false
         try { stopLockTask() } catch (_: Exception) {}
-        handler.postDelayed({ lockScreenNow() }, 400)   // kunci layar HP
+        handler.postDelayed({ lockScreenNow() }, 400)
     }
 
     private fun pushDisqualify() {
@@ -424,7 +436,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------- Suara buatan ----------
-    // Sirine peringatan bencana: nada naik-turun 600 -> 1500 -> 600 Hz, 3 detik per siklus
     private fun buildSiren(): ShortArray {
         val cycle = 3.0
         val n = (SR * cycle).toInt()
@@ -440,7 +451,6 @@ class MainActivity : AppCompatActivity() {
         return out
     }
 
-    // Buzzer: 3 dengung keras
     private fun buildBuzzer(): ShortArray {
         val n = (SR * 1.3).toInt()
         val out = ShortArray(n)
@@ -494,7 +504,6 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {}
     }
 
-    // Sirine berulang 30 detik; volume alarm dipaksa maksimal tiap 0,15 detik
     private fun startSiren() {
         if (sirenOn) return
         val data = sirenData ?: return
@@ -533,16 +542,21 @@ class MainActivity : AppCompatActivity() {
     private fun ensurePinned() {
         if (isPinned()) return
         val now = System.currentTimeMillis()
-        if (now - lastPinTry < 2500) return          // jangan membanjiri dialog sematan
+        if (now - lastPinTry < 2500) return
         lastPinTry = now
         try { startLockTask() } catch (_: Exception) {}
     }
 
-    // Cek tiap 0,6 detik. Sematan yang tadinya aktif lalu lepas saat ujian = diskualifikasi langsung.
     private val watchdog = object : Runnable {
         override fun run() {
             val pinned = isPinned()
-            if (pinned) everPinned = true
+            if (pinned) {
+                everPinned = true
+                if (awaitingPin) {            // siswa baru menekan "Mulai": beri jeda singkat
+                    awaitingPin = false
+                    suppressFor(1500)
+                }
+            }
             if (pinWanted && !pinned) {
                 if (examActive && everPinned) {
                     hardDisqualify("Melepas sematan layar saat ujian")
@@ -574,31 +588,41 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ---------- Pemicu keluar: semuanya langsung dari sistem Android (tidak menunggu timer) ----------
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
         hardDisqualify("Mencoba keluar dari aplikasi ujian (Home / pindah aplikasi)")
+    }
+
+    override fun onPause() {
+        super.onPause()
+        hardDisqualify("Aplikasi ujian ditinggalkan")
+    }
+
+    override fun onStop() {
+        super.onStop()
+        hardDisqualify("Aplikasi ujian tidak lagi tampil")
     }
 
     override fun onResume() {
         super.onResume()
         if (disqualified) {
             blackout.visibility = View.VISIBLE
-            pushDisqualify()   // kirim ulang, jaga-jaga laporan pertama gagal saat di latar belakang
+            pushDisqualify()
         }
-    }
-
-    override fun onPause() {
-        super.onPause()
-        sendViolation("Aplikasi ujian ditinggalkan")
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) enterImmersive()
-        else sendViolation("Layar ujian kehilangan fokus (notifikasi / aplikasi lain)")
+        if (hasFocus) {
+            handler.removeCallbacks(focusLossCheck)
+            enterImmersive()
+        } else {
+            sendViolation("Layar ujian kehilangan fokus (notifikasi / aplikasi lain)")
+            if (examActive) handler.postDelayed(focusLossCheck, FOCUS_LOSS_MS)
+        }
     }
 
-    // Tombol volume diblokir selama sirine
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (sirenOn && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
                 keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
