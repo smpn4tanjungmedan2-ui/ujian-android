@@ -54,6 +54,7 @@ class MainActivity : AppCompatActivity() {
         const val SIREN_MS = 30_000L          // lama sirine berbunyi
         const val USE_DEVICE_ADMIN = false    // false = tanpa admin perangkat (HP tidak ikut terkunci)
         const val FOCUS_LOSS_MS = 1200L       // fokus hilang selama ini = dianggap keluar
+        const val BACK_DISQUALIFIES = true    // true = Back saat ujian langsung sirine + diskualifikasi
         const val SR = 22050                  // sample rate suara buatan
 
         private val ALLOWED_HOSTS = listOf(
@@ -285,7 +286,10 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.btnClose).setOnClickListener { finishAndRemoveTask() }
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() { /* diblokir */ }
+            override fun handleOnBackPressed() {
+                // Back (tombol / gestur) saat ujian = pelanggaran berat; di luar ujian diabaikan
+                if (BACK_DISQUALIFIES) hardDisqualify("Menekan tombol / gestur Back saat ujian")
+            }
         })
 
         enterImmersive()
@@ -376,10 +380,7 @@ class MainActivity : AppCompatActivity() {
         awaitingPin = false
         handler.removeCallbacks(focusLossCheck)
         try { stopLockTask() } catch (_: Exception) {}
-        buzzerData?.let { playShot(it) }
-        handler.postDelayed({
-            speakThen("Peringatan! Kamu keluar dari ujian! Kamu keluar dari ujian!") { finishAndRemoveTask() }
-        }, 1300)
+        speakThen("Kamu keluar dari ujian. Kamu keluar dari ujian.") { finishAndRemoveTask() }
     }
 
     private fun speakThen(text: String, then: () -> Unit) {
